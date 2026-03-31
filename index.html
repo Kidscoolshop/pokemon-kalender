@@ -165,33 +165,54 @@
 <script>
 const SHEET_ID = "1OtNpjR67QbS_h4-IKcgCpYPvwk8OEvGyq91tXO7W4hU";
 
-// ── Status ────────────────────────────────────────────
 function setStatus(msg, type) {
   const el = document.getElementById('status-bar');
   el.textContent = msg;
   el.className = type;
 }
 
-// ── Price formatter ───────────────────────────────────
 function parsePrice(val) {
   if (val === null || val === undefined || val === '') return null;
   const n = parseFloat(String(val).replace(',', '.'));
   return isNaN(n) ? null : n.toLocaleString('da-DK', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) + ' kr';
 }
 
-// ── Date formatter ────────────────────────────────────
-function formatDate(raw) {
+// Extract a sortable Date object from whatever format Google Sheets returns
+// Handles: "2026-03-27", "2026-03-27 00:00:00", "2026/03/27", "27/3/2026", "13/3" etc.
+function parseSortableDate(raw) {
   if (!raw) return null;
   raw = String(raw).trim();
-  const iso = raw.match(/^(\d{4})-(\d{2})-(\d{2})/);
-  if (iso) {
-    const d = new Date(iso[1], iso[2]-1, iso[3]);
-    return d.toLocaleDateString('da-DK', { day: 'numeric', month: 'long', year: 'numeric' });
+
+  // "2026-03-27" or "2026-03-27 00:00:00"
+  let m = raw.match(/^(\d{4})-(\d{1,2})-(\d{1,2})/);
+  if (m) return new Date(+m[1], +m[2]-1, +m[3]);
+
+  // "2026/03/27"
+  m = raw.match(/^(\d{4})\/(\d{1,2})\/(\d{1,2})/);
+  if (m) return new Date(+m[1], +m[2]-1, +m[3]);
+
+  // "27/3/2026" or "27-3-2026"
+  m = raw.match(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{4})/);
+  if (m) return new Date(+m[3], +m[2]-1, +m[1]);
+
+  // "13/3" or "13/3/26" — assume current or next year
+  m = raw.match(/^(\d{1,2})\/(\d{1,2})$/);
+  if (m) {
+    const year = new Date().getFullYear();
+    return new Date(year, +m[2]-1, +m[1]);
   }
-  return raw;
+
+  return null;
 }
 
-// ── Card / badge classification ───────────────────────
+function formatDate(raw) {
+  const d = parseSortableDate(raw);
+  if (d) {
+    return d.toLocaleDateString('da-DK', { day: 'numeric', month: 'long', year: 'numeric' });
+  }
+  return String(raw).trim();
+}
+
 function classifyStatus(status) {
   if (!status) return { cardClass: 'card-ok', badgeClass: '', badgeText: '' };
   const s = status.toLowerCase();
@@ -207,7 +228,6 @@ function classifyStatus(status) {
   return { cardClass: 'card-ok', badgeClass: '', badgeText: '' };
 }
 
-// ── Section label ─────────────────────────────────────
 function sectionLabel(rows) {
   const names = rows.map(r => r.name || '');
   const series = ['Perfect Order','Chaos Rising','Ascended Heroes','ME05','First Partner','Sommer'];
@@ -217,35 +237,40 @@ function sectionLabel(rows) {
   return '';
 }
 
-// ── Date pill colour ──────────────────────────────────
 function datePillClass(rows) {
-  const allTba  = rows.every(r => r.status && (r.status.toLowerCase().includes('navn') || r.status.toLowerCase().includes('snart')));
+  const allTba   = rows.every(r => r.status && (r.status.toLowerCase().includes('navn') || r.status.toLowerCase().includes('snart')));
   const hasDelay = rows.some(r => r.status && r.status.toLowerCase().includes('forsinket'));
   if (allTba)   return 'date-pill-blue';
   if (hasDelay) return 'date-pill-amber';
   return 'date-pill-green';
 }
 
-// ── Group + sort by date ──────────────────────────────
-function groupByDate(rows) {
+// Group rows by their raw date string, then sort groups chronologically
+function groupAndSort(rows) {
   const groups = {};
   rows.forEach(r => {
     const key = String(r.rawDate || '').trim() || 'Ukendt dato';
     if (!groups[key]) groups[key] = [];
     groups[key].push(r);
   });
+
   const sorted = Object.keys(groups).sort((a, b) => {
-    const da = new Date(a.split(' ')[0]);
-    const db = new Date(b.split(' ')[0]);
-    if (!isNaN(da) && !isNaN(db)) return da - db;
-    return a.localeCompare(b);
+    const da = parseSortableDate(a);
+    const db = parseSortableDate(b);
+    // Both parseable → sort by date
+    if (da && db) return da - db;
+    // Only one parseable → put parseable first
+    if (da) return -1;
+    if (db) return 1;
+    // Neither → alphabetical
+    return a.localeCompare(b, 'da');
   });
+
   return { groups, sorted };
 }
 
-// ── Render ────────────────────────────────────────────
 function renderContent(rows) {
-  const { groups, sorted } = groupByDate(rows);
+  const { groups, sorted } = groupAndSort(rows);
   let html = '';
 
   sorted.forEach(key => {
@@ -282,7 +307,6 @@ function renderContent(rows) {
     html || '<div class="empty-state"><div class="big">🤔</div>Ingen produkter fundet i arket.</div>';
 }
 
-// ── CSV parser ────────────────────────────────────────
 function parseCSV(text) {
   const lines = text.split('\n').filter(l => l.trim());
   if (lines.length < 2) return [];
@@ -326,7 +350,6 @@ function parseCSV(text) {
   return rows.filter(r => r.name);
 }
 
-// ── Fetch ─────────────────────────────────────────────
 async function fetchSheet() {
   setStatus('⏳ Henter data fra Google Sheets…', 'loading');
   document.getElementById('reload-btn').style.display = 'none';
@@ -369,12 +392,9 @@ async function fetchSheet() {
   setStatus(`✅ ${rows.length} produkter hentet succesfuldt.`, 'ok');
   document.getElementById('reload-btn').style.display = 'inline-block';
 
-  setTimeout(() => {
-    document.getElementById('status-bar').className = '';
-  }, 3000);
+  setTimeout(() => { document.getElementById('status-bar').className = ''; }, 3000);
 }
 
-// ── Start ─────────────────────────────────────────────
 window.addEventListener('DOMContentLoaded', fetchSheet);
 </script>
 
